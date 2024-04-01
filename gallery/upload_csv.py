@@ -34,7 +34,7 @@ test_training_config = PreTrainingConfig(
 )
 
 
-def _fetch_metadata_from_bigquery(name: str) -> None:
+def _fetch_metadata_from_bigquery(name: str) -> pd.DataFrame:
     client = bigquery.Client()
     query: str = f"""
         SELECT * 
@@ -89,7 +89,7 @@ def _cols_matching_table(
 
 
 def _format_litgpt_df(
-    df: pd.DataFrame, cfg: PreTrainingConfig, run_time: Optional[datetime] = None
+    df: pd.DataFrame, cfg: PreTrainingConfig, run_time: datetime
 ) -> pd.DataFrame:
     df["run_uid"] = str(uuid4())
     df["config_name"] = cfg.config_name
@@ -98,11 +98,7 @@ def _format_litgpt_df(
     df["n_tokens"] = df["samples"] * cfg.max_seq_len
     df["model_flops"] = df["throughput/flops_per_sec"] * df["time/total"]
     df["n_samples"] = df["samples"]
-
-    if run_time is not None:
-        df["wall_time_utc"] = run_time + (timedelta(seconds=1) * df["time/total"])
-    else:
-        df["wall_time_utc"] = None
+    df["wall_time_utc"] = run_time + (timedelta(seconds=1) * df["time/total"])
 
     df = df.dropna(subset=_cols_matching_table(df, metrics_table, required_only=True))
 
@@ -125,7 +121,8 @@ def _upload_df(df: pd.DataFrame, table: bigquery.Table) -> None:
     job.result()
 
 
-df: pd.DataFrame = pd.read_csv(LOCAL_TEST_CSV)
-df = _format_litgpt_df(df, cfg=test_training_config)
-_sync_metadata(test_training_config)
-_upload_df(df, metrics_table)
+if __name__ == "__main__":
+    df: pd.DataFrame = pd.read_csv(LOCAL_TEST_CSV)
+    df = _format_litgpt_df(df, test_training_config, datetime.now())
+    _sync_metadata(test_training_config)
+    _upload_df(df, metrics_table)

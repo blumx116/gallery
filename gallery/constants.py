@@ -60,8 +60,8 @@ metrics_table = bigquery.Table(
         bigquery.SchemaField("n_samples", "INT64", mode="REQUIRED"),
         bigquery.SchemaField("model_flops", "FLOAT64", mode="REQUIRED"),
         bigquery.SchemaField(
-            "wall_time_utc", "DATETIME", mode="NULLABLE"
-        ),  # used for debugging
+            "wall_time_utc", "DATETIME", mode="REQUIRED"
+        ),  # used for debugging and for getting most fresh data
     ],
 )
 

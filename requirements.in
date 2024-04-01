@@ -2,3 +2,4 @@ pandas
 google-cloud-bigquery
 pyarrow>=3.0.0 # TODO: bigquery claims they are requiring this, but it doesn't appear to be the case in pip-show
 db-dtypes # used to convert query results to pd.DataFrame
+streamlit
