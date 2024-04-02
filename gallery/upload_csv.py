@@ -47,7 +47,7 @@ def _fetch_metadata_from_bigquery(name: str) -> pd.DataFrame:
     return result.to_dataframe()
 
 
-def _sync_metadata(cfg: PreTrainingConfig, overwrite: bool = False) -> None:
+def sync_metadata(cfg: PreTrainingConfig, overwrite: bool = False) -> None:
     cfg_df = pd.DataFrame.from_records([asdict(cfg)])
 
     if not overwrite:
@@ -88,7 +88,7 @@ def _cols_matching_table(
     return overlapping_columns
 
 
-def _format_litgpt_df(
+def format_litgpt_df(
     df: pd.DataFrame, cfg: PreTrainingConfig, run_time: datetime
 ) -> pd.DataFrame:
     df["run_uid"] = str(uuid4())
@@ -107,7 +107,7 @@ def _format_litgpt_df(
     return df
 
 
-def _upload_df(df: pd.DataFrame, table: bigquery.Table) -> None:
+def upload_df(df: pd.DataFrame, table: bigquery.Table) -> None:
     client = bigquery.Client(project=PROJECT_NAME)
     job_config = bigquery.LoadJobConfig(
         schema=table.schema,
@@ -123,6 +123,6 @@ def _upload_df(df: pd.DataFrame, table: bigquery.Table) -> None:
 
 if __name__ == "__main__":
     df: pd.DataFrame = pd.read_csv(LOCAL_TEST_CSV)
-    df = _format_litgpt_df(df, test_training_config, datetime.now())
-    _sync_metadata(test_training_config)
-    _upload_df(df, metrics_table)
+    df = format_litgpt_df(df, test_training_config, datetime.now())
+    sync_metadata(test_training_config)
+    upload_df(df, metrics_table)
