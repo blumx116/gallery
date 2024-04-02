@@ -1,6 +1,7 @@
 from typing import Optional, Union
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 from google.cloud import bigquery
 
@@ -33,13 +34,17 @@ def _format_constraints(**constraints: Primitive) -> str:
     return constraints_command
 
 
-def _partition_command(*group_by_elems: list[str]) -> str:
+def _partition_command(*group_by_elems: str) -> str:
     if not group_by_elems:
         # create trivial partition function that returns 1
         return ""
     else:
-        # TODO: in progress
-        pass
+        casts: list[str] = [f"CAST({elem} AS STRING)" for elem in group_by_elems]
+        # this is probably bad practice, but one of the things I'm currently allowing people to partition by is
+        # n_params and you can't partition by floats
+        # b/c I expect the table of just filtered run_uids to be fairly small at this point, I'm just casting
+        # everything to string rather than figure out what I need to cast
+        return "PARTITION BY " + ",".join(casts) + " ORDER BY start_time DESC"
 
 
 def query_unique(
@@ -83,7 +88,7 @@ all_run_uid_command: str = (
 
 
 @st.cache_data
-def get_most_recent_runs(
+def get_most_recent_run_uids(
     constraints: dict[str, Primitive], groupby: list[str]
 ) -> list[str]:
     # returns the run_uid for the most recent run where runs are deduped by the columns in groupby
@@ -108,15 +113,29 @@ def get_most_recent_runs(
         WITH runs_with_metadata AS ({filtered_runs_command})
         SELECT run_uid 
         FROM (
-            SELECT run_uid, ROW_NUMBER() OVER ({_partition_command(groupby)}) as row_num
+            SELECT run_uid, ROW_NUMBER() OVER ({_partition_command(*groupby)}) AS row_num FROM runs_with_metadata
         )
         WHERE row_num = 1
     """
+    # the additions to the command here filter to only show run_uids where it has a later start time
+    # than other runs with the same values in the groupby columns
+    # e.g. if groupby=["model_name", "n_params"], it will only show the most recent run_uid
+    # for each mode-Name, n_params pair
+    return client().query_and_wait(full_command).to_dataframe()["run_uid"].to_list()
 
-    st.write(filtered_runs)
 
-
-get_most_recent_runs(constraints={"chip_name": "v5e"}, groupby=[])
+@st.cache_data
+def get_data_for_run_uid(run_uids: list[str]) -> pd.DataFrame:
+    formatted_uids: str = ",".join([f"'{uid}'" for uid in run_uids])
+    query: str = f"""
+        SELECT m.*, md.*
+        FROM (
+            SELECT * FROM {str(metrics_table)} WHERE run_uid in ({formatted_uids})
+        ) m
+        JOIN {str(metadata_table)} md
+        ON m.config_name = md.config_name
+    """
+    return client().query_and_wait(query).to_dataframe()
 
 
 with st.expander("Chart Configuration"):
@@ -136,6 +155,41 @@ with st.expander("Chart Configuration"):
         "Sequence Length", options=available_sequence_lengths(model, model_params)
     )
 
-y_axis: Optional[str] = st.radio(
-    "Y Axis", options=["MFU", "Step Time", "Tokens/Sec"], index=0
+    y_axis: Optional[str] = st.radio(
+        "Y Axis", options=["MFU", "Step Time", "Tokens/Sec"], index=0
+    )
+
+run_uids: list[str] = get_most_recent_run_uids(
+    constraints={
+        "model_name": model,
+        "n_params": model_params,
+        "batch_size": batch_size,
+        "max_seq_len": max_seq_len,
+    },
+    groupby=["chip_name", "chip_count"],
+)
+
+df: pd.DataFrame = get_data_for_run_uid(run_uids)
+
+
+df_tlast: pd.DataFrame = df.loc[df.groupby("run_uid")["total_walltime"].idxmax()]
+# df_tlast contains the last timestep for each run
+
+
+def calculate_derivative_metrics(df: pd.DataFrame) -> pd.DataFrame:
+    df["MFU"] = df["model_flops"] / (
+        df["flops_per_chip"] * df["chip_count"] * df["total_walltime"]
+    )
+    df["Step Time"] = df["total_walltime"] / df["step"]
+    df["Tokens/Sec"] = df["n_tokens"] / df["total_walltime"]
+
+    df["Architecture"] = df["chip_name"] + " " + df["chip_count"].astype(str)
+    return df
+
+
+df_tlast = calculate_derivative_metrics(df_tlast)
+
+
+st.plotly_chart(
+    px.bar(df_tlast, x="Architecture", y=y_axis, title="Performance by Architecture")
 )
