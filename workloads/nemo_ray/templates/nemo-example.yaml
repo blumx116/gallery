@@ -1,0 +1,349 @@
+#  Copyright 2024 Google LLC
+
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+
+#       https://www.apache.org/licenses/LICENSE-2.0
+
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+{{ $timestamp := now | unixEpoch }}
+{{ $jobsuffix := randAlphaNum 2 | lower }}
+{{ $nodes := div .Values.workload.gpus 8 | max 1 }}
+{{ $gpusPerNode := min .Values.workload.gpus 8 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: "{{ $.Release.Name }}" 
+data:
+  nemo-configuration.yaml: |-
+{{ .Files.Get "selected-configuration.yaml" | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: "{{ $.Release.Name }}"
+spec:
+  clusterIP: None
+  selector:
+    job-name: "{{ $.Release.Name }}"
+---
+{{- $root := . -}}
+apiVersion: ray.io/v1alpha1
+kind: RayCluster
+metadata:
+  name: raycluster
+  labels:
+    controller-tools.k8s.io: "1.0"
+  {{- include "helm.labels" . | nindent 4 }}
+spec:
+  headGroupSpec:
+    rayStartParams:
+      dashboard-host: 0.0.0.0
+    template:
+      spec:
+        containers:
+        - image: {{ $root.Values.workload.image }}
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                - /bin/sh
+                - -c
+                - ray stop
+          name: ray-head
+  rayVersion: 2.10.0
+
+  workerGroupSpecs:
+  - groupName: small-group
+    maxReplicas: 300
+    minReplicas: 1
+    rayStartParams:
+      num-gpus: "8"
+    replicas: {{$nodes}}
+    template:
+      metadata:
+        name: "{{ $.Release.Name }}"
+        namespace: default
+        annotations:
+          key: value
+          kubectl.kubernetes.io/default-container: nemo
+          networking.gke.io/default-interface: 'eth0'
+          networking.gke.io/interfaces: |
+            [
+              {"interfaceName":"eth0","network":"default"},
+              {"interfaceName":"eth1","network":"vpc1"},
+              {"interfaceName":"eth2","network":"vpc2"},
+              {"interfaceName":"eth3","network":"vpc3"},
+              {"interfaceName":"eth4","network":"vpc4"}
+            ]        
+
+          {{- if $root.Values.volumes.gcsMounts }}
+          gke-gcsfuse/volumes: "true"
+          {{- end}}
+        labels:
+          key: value
+          name: "{{ .Release.Name}}"  
+      spec:
+        hostNetwork: true
+        dnsPolicy: ClusterFirstWithHostNet
+        subdomain: "{{.Release.Name}}"
+        restartPolicy: Never
+        tolerations:
+        - operator: "Exists"
+          key: nvidia.com/gpu
+        - operator: "Exists"
+          key: cloud.google.com/impending-node-termination 
+        volumes:
+        - name: nvidia-install-dir-host
+          hostPath:
+            path: /home/kubernetes/bin/nvidia
+        - name: lib64
+          hostPath:
+            path: /lib64       
+        - name: tcpx-nccl-plugin-volume
+          emptyDir: {}    
+        - name: tcpx-daemon-socket
+          hostPath:
+            path: /run/tcpx
+        - name: workload-terminated-volume
+          emptyDir: {}        
+        - name: local-ssd
+          hostPath:
+            path: /mnt/stateful_partition/kube-ephemeral-ssd   
+
+        {{- range $pvc := $root.Values.volumes.pvcMounts }}
+        - name: "{{ $pvc.name }}"
+          persistentVolumeClaim:
+            claimName: "{{ $pvc.name }}"
+        {{- end }}    
+
+        {{- range $gcs := $root.Values.volumes.gcsMounts }}
+        - name: "{{ $gcs.bucketName }}"
+          csi:
+            driver: gcsfuse.csi.storage.gke.io
+            volumeAttributes:
+              bucketName: "{{ $gcs.bucketName }}"
+        {{- end}}
+
+        - name: shared-memory
+          emptyDir:
+            medium: "Memory"
+            sizeLimit: 200Gi 
+        - name: workload-configuration
+          configMap:
+            name: "{{.Release.Name}}"
+        initContainers:
+        - name: training-data-downloader
+          image: gcr.io/google.com/cloudsdktool/google-cloud-cli
+          volumeMounts:
+          - name: local-ssd
+            mountPath: "{{ $root.Values.volumes.ssdMountPath }}"
+
+          {{- range $pvc := $root.Values.volumes.pvcMounts }}
+          - name: "{{ $pvc.name }}"
+            mountPath: "{{ $pvc.mountPath }}"
+          {{- end }}
+
+          {{- range $gcs := $root.Values.volumes.gcsMounts }}
+          - name: "{{ $gcs.bucketName }}"
+            mountPath: "{{ $gcs.mountPath }}"
+          {{- end }}
+
+          env:
+          - name: GCS_DATA_SOURCE
+            value: "{{ $root.Values.gcsDownload.source }}"
+          - name: GCS_DATA_TARGET
+            value: "{{ $root.Values.gcsDownload.target }}"
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Caching training data from $GCS_DATA_SOURCE to $GCS_DATA_TARGET"
+              mkdir -p $GCS_DATA_TARGET
+
+              SECONDS=0
+              gcloud storage rsync \
+                --recursive \
+                $GCS_DATA_SOURCE $GCS_DATA_TARGET
+              duration=$SECONDS
+              echo "Transferred or synchronized $GCS_DATA_SOURCE to $GCS_DATA_TARGET in $duration seconds."
+          
+        {{- if $root.Values.networking.enableTcpx }}
+
+        - name: tcpx-nccl-plugin-installer
+          image: "{{$root.Values.networking.tcpxRepository}}/{{$root.Values.networking.tcpxPluginVersion}}"
+          imagePullPolicy: Always
+          volumeMounts:
+          - name: tcpx-nccl-plugin-volume
+            mountPath: /var/lib/tcpx
+          command:
+            - /bin/sh
+            - -c
+            - |
+              /scripts/container_entry.sh install
+
+        {{- end }}
+
+        containers:
+        {{- if $root.Values.networking.enableTcpx }}
+        - name: tcpd-daemon
+          image: "us-central1-docker.pkg.dev/supercomputer-testing/tejasnama-gcr/tcpx_ray:latest"
+          imagePullPolicy: Always
+          command:
+          - "bash"
+          - "-c"
+          - |
+            /tcpgpudmarxd/build/app/tcpgpudmarxd {{- range $.Values.networking.flags }} {{.}}{{- end }} &
+            while [ ! -e "/usr/share/nemo/workload_terminated" ]; do sleep 10; done
+            pkill -e "^"tcpgpudmarxd || true
+            sleep 30
+          securityContext:
+            privileged: true
+          volumeMounts:
+          - name: nvidia-install-dir-host
+            mountPath: /usr/local/nvidia
+          - name: tcpx-daemon-socket
+            mountPath: /tmp
+          - name: workload-terminated-volume
+            mountPath: /semaphore
+          env:
+          - name: LD_LIBRARY_PATH
+            value: /usr/local/nvidia/lib64
+        {{- end }} 
+        - name: nemo
+          image: "{{ $root.Values.workload.image }}"
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                - /bin/sh
+                - -c
+                - ray stop
+          imagePullPolicy: Always
+          env:
+          - name: JOB_IDENTIFIER
+            value: "{{ .Release.Name }}-{{ $timestamp }}-{{ $jobsuffix }}"
+
+          # The following settings are specific to the Torch distributed launcher:
+          - name: TORCH_DISTRIBUTED_TARGET
+            value: "{{ $root.Values.workload.torchDistributedTarget }}"
+          - name: MASTER_ADDR
+            value: "{{.Release.Name}}-0.{{.Release.Name}}.default.svc.cluster.local"
+          - name: MASTER_PORT
+            value: "6002"
+          - name: WORLD_SIZE
+            value: "{{ $root.Values.workload.gpus }}"        
+          - name: NNODES
+            value: "{{ $nodes }}"        
+          - name: GPUS_PER_NODE
+            value: "{{ $gpusPerNode }}"        
+          - name: GLOO_SOCKET_IFNAME
+            value: "eth0"
+
+          # The leader node can launch an embedded Tensorboard server (if needed)
+          {{- if $root.Values.workload.embeddedTensorboardTarget }}
+          - name: EMBEDDED_TENSORBOARD_TARGET
+            value: "{{ $root.Values.workload.embeddedTensorboardTarget}}"             
+          {{- end }}
+
+          # The following arguments are passed to the Workload:
+          {{- range $environment_variable := $root.Values.workload.arguments }}
+          - name: "WORKLOAD_{{ $environment_variable.name }}"
+            value: "{{ $environment_variable.value }}"
+          {{- end }}        
+
+          # Mount paths for volumes:
+          - name: SSD_MOUNT_PATH
+            value: "{{ $root.Values.volumes.ssdMountPath }}"      
+            
+          # The following NCCL settings should likely not be adjusted:
+          - name: NCCL_SOCKET_IFNAME
+            value: "eth0"
+          - name: NCCL_CHECK_POINTERS
+            value: "0"
+          - name: NCCL_DYNAMIC_CHUNK_SIZE
+            value: "524288"
+          - name: NCCL_P2P_NET_CHUNKSIZE
+            value: "524288"
+          - name: NCCL_P2P_PCI_CHUNKSIZE
+            value: "524288"
+          - name: NCCL_P2P_NVL_CHUNKSIZE
+            value: "1048576"
+          - name: NCCL_CROSS_NIC
+            value: "0"
+          - name: NCCL_ALGO
+            value: "Ring"
+          - name: NCCL_PROTO
+            value: "Simple"
+          - name: NCCL_NET_GDR_LEVEL
+            value: "PIX"
+          - name: NCCL_P2P_PXN_LEVEL
+            value: "0"
+    
+          {{- range $environment_variable := $root.Values.networking.ncclSettings }}
+          - name: {{ $environment_variable.name }}
+            value: "{{ $environment_variable.value }}"
+          {{- end }}
+        
+          {{- if $root.Values.networking.enableTcpx }}
+
+          # The following TCPx settings should likely not be adjusted:
+          - name: NCCL_GPUDIRECTTCPX_CTRL_DEV
+            value: "eth0"
+          - name: NCCL_GPUDIRECTTCPX_SOCKET_IFNAME
+            value: "eth1,eth2,eth3,eth4"
+          - name: NCCL_GPUDIRECTTCPX_TX_BINDINGS
+            value: "eth1:8-21,112-125;eth2:8-21,112-125;eth3:60-73,164-177;eth4:60-73,164-177"
+          - name: NCCL_GPUDIRECTTCPX_RX_BINDINGS
+            value: "eth1:22-35,126-139;eth2:22-35,126-139;eth3:74-87,178-191;eth4:74-87,178-191"
+          - name: NCCL_GPUDIRECTTCPX_PROGRAM_FLOW_STEERING_WAIT_MICROS
+            value: "1000000"
+          - name: NCCL_GPUDIRECTTCPX_FORCE_ACK
+            value: "0"
+          - name: NCCL_GPUDIRECTTCPX_TX_COMPLETION_NANOSLEEP
+            value: "1000"     
+        
+          {{- range $environment_variable := $root.Values.networking.tcpxSettings }}
+          - name: {{ $environment_variable.name }}
+            value: "{{ $environment_variable.value }}"
+          {{- end }}
+        
+          {{- end }}
+
+          volumeMounts:
+            - name: nvidia-install-dir-host
+              mountPath: /usr/local/nvidia
+            - name: tcpx-nccl-plugin-volume
+              mountPath: /usr/local/tcpx
+            - name: tcpx-daemon-socket
+              mountPath: /tmp
+            - name: workload-terminated-volume
+              mountPath: /semaphore   
+            - name: workload-configuration
+              mountPath: /etc/workload-configuration  
+            - name: shared-memory
+              mountPath: /dev/shm 
+            - name: local-ssd
+              mountPath: "{{ $root.Values.volumes.ssdMountPath }}"
+
+            {{- range $pvc := $root.Values.volumes.pvcMounts }}
+            - name: "{{ $pvc.name }}"
+              mountPath: "{{ $pvc.mountPath }}"
+            {{- end }}
+
+            {{- range $gcs := $root.Values.volumes.gcsMounts }}
+            - name: "{{ $gcs.bucketName }}"
+              mountPath: "{{ $gcs.mountPath }}"
+            {{- end }}        
+
+          resources:
+            limits:
+              nvidia.com/gpu: {{ $gpusPerNode }}
+---
