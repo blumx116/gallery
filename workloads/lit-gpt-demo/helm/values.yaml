@@ -10,7 +10,7 @@ network:
 logging:
   collectNsysProfile: 'no' # Set to 'yes' for profiles
   ncclDebugLevel: WARN
-  gcsExperimentBucket: 'tejas_gpu' # Set to a writable GCS bucket to upload logs and Nsys Profiles
+  gcsExperimentBucket: 'tejas_litgpt_demo' # Set to a writable GCS bucket to upload logs and Nsys Profiles
   jobTimestamp: 1
   experimentDir: llama2-7b-new
 workload:
