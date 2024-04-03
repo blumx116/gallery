@@ -10,6 +10,7 @@ from google.cloud import bigquery
 from dataclasses import dataclass
 
 from google.cloud import bigquery
+import google.auth
 
 import os
 import pandas as pd
@@ -17,7 +18,7 @@ import sys
 
 from tensorflow.python.summary.summary_iterator import summary_iterator
 
-PROJECT_NAME: str = "tpu-prod-env-one-vm"
+PROJECT_NAME: str = "supercomputer-testing"
 _DATASET_NAME: str = "BenchmarkingGallery"
 _METADATA_TABLE_NAME: str = "metadata"
 _METRICS_TABLE_NAME: str = "metrics"
@@ -104,27 +105,15 @@ metadata_table = bigquery.Table(
     ],
 )
 
-test_training_config = PreTrainingConfig(
-    config_name="llama2-70b-h100 nvlx64",
-    chip_name="h100 nvl",
-    flops_per_chip=989.4e12,
-    chip_hourly_price=3.928,
-    chip_count=64,
-    architecture_shape="4x4x4",
-    region="us-central1",
-    implementation_name="litgpt",
-    ml_framework="pt",
-    model_name="llama-2",
-    n_params=70e9,
-    precision="bf16",
-    max_seq_len=4096,
-    batch_size=6,
-    container_path="NULL",
-)
-
-
+# gcloud auth application-default login --scopes=https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/cloud-platform
 def _fetch_metadata_from_bigquery(name: str) -> pd.DataFrame:
-    client = bigquery.Client()
+    credentials, project = google.auth.default(
+        scopes=[
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/cloud-platform",
+        ]
+    )
+    client = bigquery.Client(credentials=credentials, project=project)
     query: str = f"""
         SELECT * 
         FROM {str(metadata_table)}
@@ -182,12 +171,12 @@ def format_litgpt_df(
 ) -> pd.DataFrame:
     df["run_uid"] = str(uuid4())
     df["config_name"] = cfg.config_name
-    df["total_walltime"] = df["time/total"]
-    df["step"] = df["step"]
-    df["n_tokens"] = df["samples"] * cfg.max_seq_len
-    df["model_flops"] = df["throughput/flops_per_sec"] * df["time/total"]
-    df["n_samples"] = df["samples"]
-    df["wall_time_utc"] = run_time + (timedelta(seconds=1) * df["time/total"])
+    df["total_walltime"] = df["train_step_timing in s"]
+    df["step"] = df["global_step"]
+    df["n_tokens"] = df["global_step"] # df["samples"] * cfg.max_seq_len
+    df["model_flops"] = df["global_step"] # df["throughput/flops_per_sec"] * df["time/total"]
+    df["n_samples"] = df["global_step"] # df["samples"]
+    df["wall_time_utc"] = run_time + (timedelta(seconds=1) * df["total_walltime"])
 
     df = df.dropna(subset=_cols_matching_table(df, metrics_table, required_only=True))
 
@@ -197,7 +186,13 @@ def format_litgpt_df(
 
 
 def upload_df(df: pd.DataFrame, table: bigquery.Table) -> None:
-    client = bigquery.Client(project=PROJECT_NAME)
+    credentials, project = google.auth.default(
+        scopes=[
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/cloud-platform",
+        ]
+    )
+    client = bigquery.Client(credentials=credentials, project=project)
     job_config = bigquery.LoadJobConfig(
         schema=table.schema,
     )
@@ -229,6 +224,7 @@ def get_values(log_dir):
 
     for e in summary_iterator(file_path):
         for v in e.summary.value:
+            print (v.tag)
             if v.tag in required_tags:
                 data[v.tag].append(v.simple_value)
     
@@ -238,10 +234,33 @@ def dump_as_csv(data):
     df = pd.DataFrame.from_dict(data)
     df.to_csv("logs.csv")
 
+test_training_config = PreTrainingConfig(
+    config_name="gpt-5b-2nodes",
+    chip_name="h100 nvl",
+    flops_per_chip=989.4e12,
+    chip_hourly_price=3.928,
+    chip_count=16,
+    architecture_shape="4x4x4",
+    region="us-central1",
+    implementation_name="nemo",
+    ml_framework="pt",
+    model_name="gpt-5b",
+    n_params=5e9,
+    precision="bf16",
+    max_seq_len=4096,
+    batch_size=128,
+    container_path="NULL",
+)
+
 if __name__ == "__main__":
     
     data = get_values(sys.argv[1])
+    print ("Print data")
+    print (data)
+    print ("Done printing data")
+    
     df = pd.DataFrame.from_dict(data)
+    
     # dump_as_csv(data)
     # df: pd.DataFrame = pd.read_csv(LOCAL_TEST_CSV)
     df = format_litgpt_df(df, test_training_config, datetime.now())
