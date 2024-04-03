@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from google.cloud import bigquery
 
-PROJECT_NAME: str = "tpu-prod-env-one-vm"
+PROJECT_NAME: str = "supercomputer-testing"
 _DATASET_NAME: str = "BenchmarkingGallery"
 _METADATA_TABLE_NAME: str = "metadata"
 _METRICS_TABLE_NAME: str = "metrics"
