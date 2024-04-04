@@ -3,3 +3,5 @@
 **/*.pyc
 .venv
 
+workloads/lit_gpt_ray/debug/nccl_graph_1_0.graph
+workloads/lit_gpt_ray/debug/nccl_topo_1_0.xml
