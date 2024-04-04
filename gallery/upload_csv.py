@@ -63,7 +63,7 @@ def sync_metadata(cfg: PreTrainingConfig, overwrite: bool = False) -> None:
 
             return None
 
-    _upload_df(cfg_df, metadata_table)
+    upload_df(cfg_df, metadata_table)
 
 
 def _cols_matching_table(
@@ -95,12 +95,12 @@ def format_litgpt_df(
 ) -> pd.DataFrame:
     df["run_uid"] = str(uuid4())
     df["config_name"] = cfg.config_name
-    df["total_walltime"] = df["time/total"]
+    df["total_walltime"] = df["time"]
     df["step"] = df["step"]
     df["n_tokens"] = df["samples"] * cfg.max_seq_len
-    df["model_flops"] = df["throughput/flops_per_sec"] * df["time/total"]
+    df["model_flops"] = df["device/flops_per_sec"] * df["time"]
     df["n_samples"] = df["samples"]
-    df["wall_time_utc"] = run_time + (timedelta(seconds=1) * df["time/total"])
+    df["wall_time_utc"] = run_time + (timedelta(seconds=1) * df["time"])
 
     df = df.dropna(subset=_cols_matching_table(df, metrics_table, required_only=True))
 
