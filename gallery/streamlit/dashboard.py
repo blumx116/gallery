@@ -1,12 +1,10 @@
-from typing import Optional, Union
+from typing import Optional
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from google.cloud import bigquery
 from pandas.api.types import is_datetime64_any_dtype
 
-from gallery.constants import metadata_table, metrics_table
 from gallery.streamlit.elements import filter_config
 from gallery.streamlit.queries import (
     Primitive,
@@ -14,9 +12,9 @@ from gallery.streamlit.queries import (
     get_data_for_run_uid,
     get_most_recent_run_uids,
 )
-from gallery.streamlit.utils import dict_diff, human_readable_bignum, pretty_dict
+from gallery.streamlit.utils import dict_diff, pretty_dict
 
-st.title("Benchmarking Gallery Dashboard")
+st.title("Benchmarking Dashboard")
 
 benchmarking_tab, regression_test_tab, experiment_comparison_tab = st.tabs(
     ["Benchmarking", "Regression Test", "Experiment Comparison"]
@@ -27,7 +25,7 @@ def get_last_timestep(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[df.groupby("run_uid")["total_walltime"].idxmax()]
 
 
-def calculate_derivative_metrics(df: pd.DataFrame) -> pd.DataFrame:
+def calculate_derived_metrics(df: pd.DataFrame) -> pd.DataFrame:
     df["MFU"] = df["model_flops"] / (
         df["flops_per_chip"] * df["chip_count"] * df["total_walltime"]
     )
@@ -40,8 +38,29 @@ def calculate_derivative_metrics(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def hardware_comparison(widget_key_prefix: str = "hardware_comparison"):
-    st.header("Performance by Hardware")
+def calculate_stepwise_derived_metrics(df: pd.DataFrame) -> pd.DataFrame:
+    # TODO: this is just a duplicate of calculate_derivative_metrics except we wrap a couple columns
+    # that contain cumulative values with __bystep
+    # the last 3 columns are literally identical
+
+    def __bystep(col: str) -> pd.Series:
+        # group by run_uid so that the first value of one run isn't compared against the last value
+        # of the run before it
+        return df.groupby(["run_uid"])[col].diff()  # type: ignore
+
+    df["MFU"] = __bystep("model_flops") / (
+        df["flops_per_chip"] * df["chip_count"] * __bystep("total_walltime")
+    )
+    df["Step Time"] = __bystep("total_walltime") / __bystep("step")
+    df["Tokens/Sec"] = __bystep("n_tokens") / __bystep("total_walltime")
+
+    df["Perf/$"] = df["Tokens/Sec"] / (df["chip_count"] * df["chip_hourly_price"])
+    df["Elapsed Time"] = pd.to_datetime(df["total_walltime"], unit="s")
+    return df
+
+
+def accelerator_comparison(widget_key_prefix: str = "accelerator_comparison"):
+    st.header("Performance by Accelerator")
 
     configs, charts = st.columns([1, 2])
 
@@ -73,17 +92,20 @@ def hardware_comparison(widget_key_prefix: str = "hardware_comparison"):
     df_tlast: pd.DataFrame = get_last_timestep(df)
     # df_tlast contains the last timestep for each run
 
-    df_tlast = calculate_derivative_metrics(df_tlast)
+    df_tlast = calculate_derived_metrics(df_tlast)
 
     with charts:
-        st.plotly_chart(
-            px.bar(
-                df_tlast,
-                x="Architecture",
-                y=y_axis,
-                title=f"Performance ({y_axis}) by Architecture",
-            )
+        fig = px.bar(
+            df_tlast,
+            x="Architecture",
+            y=y_axis,
+            title=f"Performance ({y_axis}) by Architecture",
         )
+
+        if y_axis == "MFU":
+            fig.update_yaxes(tickformat=".1%")
+
+        st.plotly_chart(fig)
 
 
 def single_experiment_run(widget_key_prefix: str = "single_experiment_run"):
@@ -120,7 +142,7 @@ def single_experiment_run(widget_key_prefix: str = "single_experiment_run"):
         constraints=filter_constraints, groupby=[]
     )
     df: pd.DataFrame = get_data_for_run_uid(run_uids)
-    df = calculate_derivative_metrics(df)
+    df = calculate_stepwise_derived_metrics(df)
 
     with charts:
         fig = px.scatter(df, x=x_axis, y=y_axis)
@@ -128,11 +150,14 @@ def single_experiment_run(widget_key_prefix: str = "single_experiment_run"):
         if is_datetime64_any_dtype(df[x_axis]):
             fig.update_xaxes(tickformat="%H:%M")
 
+        if y_axis == "MFU":
+            fig.update_yaxes(tickformat=".1%")
+
         st.plotly_chart(fig)
 
     st.header("Performance vs Historical Runs")
 
-    dfhist: pd.DataFrame = calculate_derivative_metrics(
+    dfhist: pd.DataFrame = calculate_derived_metrics(
         get_last_timestep(get_data_for_run_uid(filtered_runs(filter_constraints)))
     )
 
@@ -146,6 +171,10 @@ def single_experiment_run(widget_key_prefix: str = "single_experiment_run"):
     with chart2:
         fig = px.scatter(dfhist, x="Finish Time (UTC)", y=y_axis)
         fig.update_xaxes(tickformat="%H:%M")
+
+        if y_axis == "MFU":
+            fig.update_yaxes(tickformat=".1%")
+
         st.plotly_chart(fig)
 
 
@@ -187,11 +216,19 @@ def two_experiments_side_by_side(widget_key_prefix="two_experiments_side_by_side
             key=widget_key_prefix + "_y_axis",
         )
 
-    df1 = calculate_derivative_metrics(
-        get_data_for_run_uid(get_most_recent_run_uids(filter_constraints1, groupby=[]))
+    df1 = calculate_derived_metrics(
+        get_last_timestep(
+            get_data_for_run_uid(
+                get_most_recent_run_uids(filter_constraints1, groupby=[])
+            )
+        )
     )
-    df2 = calculate_derivative_metrics(
-        get_data_for_run_uid(get_most_recent_run_uids(filter_constraints2, groupby=[]))
+    df2 = calculate_derived_metrics(
+        get_last_timestep(
+            get_data_for_run_uid(
+                get_most_recent_run_uids(filter_constraints2, groupby=[])
+            )
+        )
     )
 
     with chart:
@@ -216,11 +253,20 @@ def two_experiments_side_by_side(widget_key_prefix="two_experiments_side_by_side
                     },
                 ]
             )
-            st.plotly_chart(px.bar(plot_df, x="name", y=y_axis))
 
+            fig = px.bar(plot_df, x="name", y=y_axis)
+
+            if y_axis == "MFU":
+                fig.update_yaxes(tickformat=".1%")
+
+            st.plotly_chart(fig)
+
+
+if st.button("Refresh Data"):
+    st.cache_data.clear()
 
 with benchmarking_tab:
-    hardware_comparison()
+    accelerator_comparison()
 
 with regression_test_tab:
     single_experiment_run()

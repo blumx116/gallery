@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from typing import Any
 
 from google.cloud import bigquery
 
@@ -39,6 +40,9 @@ class PreTrainingConfig:
     max_seq_len: int
     batch_size: int
     container_path: str
+
+    def except_where(self, **kwargs: Any) -> "PreTrainingConfig":
+        return PreTrainingConfig(**{**asdict(self), **kwargs})
 
 
 def clean_name(name: str) -> str:

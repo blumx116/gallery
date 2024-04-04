@@ -32,5 +32,5 @@ def dict_diff(dict1: dict[str, Any], dict2: dict[str, Any]) -> dict[str, Any]:
 def pretty_dict(d: dict[str, Any]) -> str:
     result: str = ""
     for key, value in d.items():
-        result += f"{key}: {value_formatter(value)}\n"
+        result += f"{key}: {value_formatter(value)}<br>"
     return result
