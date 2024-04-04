@@ -1,0 +1,9 @@
+steps:
+- name: "gcr.io/cloud-builders/docker"
+  args:
+  - build
+  - "--tag=us-central1-docker.pkg.dev/supercomputer-testing/samcmho/samcmho-litgpt-ray"
+  - "--file=./workloads/lit_gpt_ray/Dockerfile"
+  - .
+images:
+- "us-central1-docker.pkg.dev/supercomputer-testing/samcmho/samcmho-litgpt-ray"

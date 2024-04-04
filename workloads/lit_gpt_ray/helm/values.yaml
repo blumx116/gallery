@@ -1,0 +1,25 @@
+cluster:
+  nNodes: 4
+  gpusPerNode: 8
+network:
+  useTcpx: "no" # set to yes
+  ncclIfnames: 'eth0'
+  ncclPlugin: us-docker.pkg.dev/gce-ai-infra/gpudirect-tcpx/nccl-plugin-gpudirecttcpx-dev:v3.1.7
+  rxdmContainer: us-docker.pkg.dev/gce-ai-infra/gpudirect-tcpx/tcpgpudmarxd-dev:v2.0.12
+  disablePmtu: "yes"
+logging:
+  collectNsysProfile: 'no' # Set to 'yes' for profiles
+  ncclDebugLevel: WARN
+  gcsExperimentBucket: 'ml_engagement' # Set to a writable GCS bucket to upload logs and Nsys Profiles
+  jobTimestamp: 1
+  experimentDir: Llama-2-70b-batch6-node4-epoch5
+workload:
+  gcsDataBucket: litgpt-public-bucket
+  dataDir: openwebtext_dataset
+  image: us-central1-docker.pkg.dev/supercomputer-testing/samcmho/samcmho-litgpt-ray:latest
+  modelName: Llama-2-70b-hf
+  batchSize: 6
+  microBatchSize: 6
+  warmupIters: 10
+  numberOfEpochs: 5
+  stepsPerEpoch: 30
