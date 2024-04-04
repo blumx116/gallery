@@ -7,6 +7,8 @@ from uuid import uuid4
 import pandas as pd
 from google.cloud import bigquery
 
+import argparse
+
 from gallery.constants import (
     LOCAL_TEST_CSV,
     PROJECT_NAME,
@@ -122,7 +124,12 @@ def upload_df(df: pd.DataFrame, table: bigquery.Table) -> None:
 
 
 if __name__ == "__main__":
-    df: pd.DataFrame = pd.read_csv(LOCAL_TEST_CSV)
+    parser = argparse.ArgumentParser(description="Parse metrics.csv and upload to Big Query")
+    parser.add_argument("filepath", help="The path of metrics.csv to process")
+
+    args = parser.parse_args()
+
+    df: pd.DataFrame = pd.read_csv(args.filepath)
     df = format_litgpt_df(df, test_training_config, datetime.now())
     sync_metadata(test_training_config)
     upload_df(df, metrics_table)
