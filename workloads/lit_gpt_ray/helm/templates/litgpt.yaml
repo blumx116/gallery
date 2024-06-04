@@ -1,0 +1,216 @@
+{{- $requiredVar := .Values.cluster.nNodes | required ".Values.cluster.nNodes is required" -}}
+{{- $requiredVar := .Values.network.ncclIfnames | required ".Values.ncclIfnames is required" -}}
+{{- $requiredVar := .Values.logging.jobTimestamp | required ".Values.jobTimestamp is required" -}}
+{{- $requiredVar := .Values.logging.experimentDir | required ".Values.experimentDir is required" -}}
+{{- $requiredVar := .Values.workload.gcsDataBucket | required ".Values.gcsDataBucket is required" -}}
+{{- $requiredVar := .Values.workload.dataDir| required ".Values.dataDir is required" -}}
+{{- $requiredVar := .Values.workload.image | required ".Values.image is required" -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: "pytorch-leader-{{$.Release.Name}}"
+spec:
+  selector:
+    name: "pytorch-leader-{{$.Release.Name}}"
+  clusterIP: None
+  ports:
+  - name: pytorch-leader
+    port: 6002
+---
+apiVersion: ray.io/v1alpha1
+kind: RayCluster
+metadata:
+  name: {{ include "helm.fullname" . }}-raycluster
+  labels:
+    controller-tools.k8s.io: "1.0"
+  {{- include "helm.labels" . | nindent 4 }}
+spec:
+  headGroupSpec:
+    rayStartParams:
+      dashboard-host: 0.0.0.0
+    template:
+      spec:
+        containers:
+        - image: {{$.Values.workload.image}}
+          imagePullPolicy: Always
+          securityContext:
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                - /bin/sh
+                - -c
+                - ray stop
+          name: ray-head
+  rayVersion: 2.10.0
+  workerGroupSpecs:
+  - groupName: small-group
+    maxReplicas: 300
+    minReplicas: 1
+    rayStartParams:
+      num-gpus: "{{.Values.cluster.gpusPerNode}}"
+    replicas: {{$.Values.cluster.nNodes}}
+    template:
+      metadata:
+        annotations:
+          key: value
+        labels:
+          key: value
+          name: "pytorch-leader-{{$.Release.Name}}"
+      spec:
+        hostNetwork: true
+        dnsPolicy: ClusterFirstWithHostNet
+        subdomain: litgpt-{{$.Release.Name}}
+        serviceAccountName: "default"
+        restartPolicy: Never
+        volumes:
+        - name: nvidia-install-dir-host
+          hostPath:
+            path: /home/kubernetes/bin/nvidia/lib64
+        - name: tcpd-socket
+          hostPath:
+            path: /run/tcpx
+        - name: shared-memory
+          emptyDir:
+            medium: "Memory"
+            sizeLimit: 200Gi
+        - name: workload-terminated-volume
+          emptyDir: {}
+        - name: tcpx-nccl-plugin-volume
+          emptyDir: {}
+        - name: data-volume
+          hostPath:
+            path: /home/data
+        {{if eq .Values.network.useTcpx "yes"}}
+        initContainers:
+        - name: tcpx-nccl-plugin-installer
+          image: {{.Values.network.ncclPlugin}}
+          imagePullPolicy: Always
+          volumeMounts:
+          - name: tcpx-nccl-plugin-volume
+            mountPath: /var/lib/tcpx
+          resources:
+            requests:
+              cpu: 150m
+          command:
+            - /bin/sh
+            - -c
+            - |
+              /scripts/container_entry.sh install --install-nccl
+        {{end}}
+        containers:
+        {{if eq .Values.network.useTcpx "yes"}}
+        - name: tcpd-daemon
+          image: {{.Values.network.rxdmContainer}}
+          imagePullPolicy: Always
+          command:
+          - "bash"
+          - "-c"
+          - |
+            /tcpgpudmarxd/build/app/tcpgpudmarxd --gpu_nic_preset a3vm --gpu_shmem_type fd --setup_param "--verbose 128 2 0" &
+            while [ ! -e "/usr/share/litgpt/workload_terminated" ]; do sleep 10; done
+          securityContext:
+            privileged: true
+          volumeMounts:
+          - name: nvidia-install-dir-host
+            mountPath: /usr/local/nvidia/lib64
+          - name: tcpd-socket
+            mountPath: /tmp
+          - name: workload-terminated-volume
+            mountPath: /usr/share/litgpt
+          env:
+          - name: LD_LIBRARY_PATH
+            value: /usr/local/nvidia/lib64
+        {{end}}
+        - name: litgpt
+          image: {{.Values.workload.image}}
+          imagePullPolicy: Always
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                - /bin/sh
+                - -c
+                - ray stop
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+                - SYS_ADMIN
+                - SYS_PTRACE
+                - IPC_LOCK
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: LD_LIBRARY_PATH
+              value: "/usr/lib/x86_64-linux-gnu:/usr/local/nvidia/lib64"
+            - name: JOB_TIMESTAMP
+              value: "{{.Values.logging.jobTimestamp}}"
+            - name: MASTER_ADDR
+              value: "pytorch-leader-{{$.Release.Name}}"
+            - name: NCCL_SOCKET_IFNAME
+              value: "{{.Values.network.ncclIfnames}}"
+            - name: NNODES
+              value: "{{.Values.cluster.nNodes}}"
+            - name: GPUS_PER_NODE
+              value: "{{.Values.cluster.gpusPerNode}}"
+            - name: USE_TCPX
+              value: "{{.Values.network.useTcpx}}"
+            - name: TCPX_FORCE_ACK
+              value: "{{.Values.network.tcpxForceAck}}"
+            - name: DISABLE_PMTU
+              value: "{{.Values.network.disablePmtu}}"
+            - name: CPU_PINNING_MODE
+              value: "{{.Values.network.cpuPinningMode}}"
+            - name: GCS_EXPERIMENT_BUCKET
+              value: "{{.Values.logging.gcsExperimentBucket}}"
+            - name: EXPERIMENT_ROOT_DIR
+              value: "{{.Values.logging.experimentDir}}"
+            - name: GCS_DATA_BUCKET
+              value: "{{.Values.workload.gcsDataBucket}}"
+            - name: DATA_DIR
+              value: "{{.Values.workload.dataDir}}"
+            - name: BATCH_SIZE
+              value: "{{.Values.workload.batchSize}}"
+            - name: MICRO_BATCH_SIZE
+              value: "{{.Values.workload.microBatchSize}}"
+            - name: MODEL_NAME
+              value: "{{.Values.workload.modelName}}"
+            - name: WARMUP_ITERS
+              value: "{{.Values.workload.warmupIters}}"
+            - name: COLLECT_NSYS_PROFILE
+              value: "{{.Values.logging.collectNsysProfile}}"
+            - name: CLUSTER_TYPE
+              value: GKE
+            - name: NCCL_NVLS_ENABLE
+              value: '0'
+            - name: NCCL_DEBUG
+              value: "{{.Values.logging.ncclDebugLevel}}"
+            - name: NUMBER_OF_EPOCHS
+              value: "{{.Values.workload.numberOfEpochs}}"
+            - name: STEPS_PER_EPOCH
+              value: "{{.Values.workload.stepsPerEpoch}}"
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: 'expandable_segments:True'
+          volumeMounts:
+            - name: nvidia-install-dir-host
+              mountPath: /usr/local/nvidia/lib64
+            - name: tcpx-nccl-plugin-volume
+              mountPath: /usr/local/tcpx
+            - name: tcpd-socket
+              mountPath: /tmp
+            - name: shared-memory
+              mountPath: /dev/shm
+            - name: workload-terminated-volume
+              mountPath: /usr/share/litgpt
+            - name: data-volume
+              mountPath: /data
+          resources:
+            limits:
+              nvidia.com/gpu: "{{.Values.cluster.gpusPerNode}}"

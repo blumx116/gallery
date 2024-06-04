@@ -1,21 +1,15 @@
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from time import monotonic
 from typing import Optional
 from uuid import uuid4
-
-import pandas as pd
 from google.cloud import bigquery
-
-from dataclasses import dataclass
-
-from google.cloud import bigquery
+from tensorflow.python.summary.summary_iterator import summary_iterator
 
 import os
-import pandas as pd
 import sys
-
-from tensorflow.python.summary.summary_iterator import summary_iterator
+import pandas as pd
+import argparse
 
 PROJECT_NAME: str = "tpu-prod-env-one-vm"
 _DATASET_NAME: str = "BenchmarkingGallery"
@@ -150,7 +144,7 @@ def sync_metadata(cfg: PreTrainingConfig, overwrite: bool = False) -> None:
 
             return None
 
-    _upload_df(cfg_df, metadata_table)
+    upload_df(cfg_df, metadata_table)
 
 
 def _cols_matching_table(
@@ -182,12 +176,12 @@ def format_litgpt_df(
 ) -> pd.DataFrame:
     df["run_uid"] = str(uuid4())
     df["config_name"] = cfg.config_name
-    df["total_walltime"] = df["time/total"]
+    df["total_walltime"] = df["time"]
     df["step"] = df["step"]
     df["n_tokens"] = df["samples"] * cfg.max_seq_len
-    df["model_flops"] = df["throughput/flops_per_sec"] * df["time/total"]
+    df["model_flops"] = df["device/flops_per_sec"] * df["time"]
     df["n_samples"] = df["samples"]
-    df["wall_time_utc"] = run_time + (timedelta(seconds=1) * df["time/total"])
+    df["wall_time_utc"] = run_time + (timedelta(seconds=1) * df["time"])
 
     df = df.dropna(subset=_cols_matching_table(df, metrics_table, required_only=True))
 
@@ -239,11 +233,11 @@ def dump_as_csv(data):
     df.to_csv("logs.csv")
 
 if __name__ == "__main__":
-    
-    data = get_values(sys.argv[1])
-    df = pd.DataFrame.from_dict(data)
-    # dump_as_csv(data)
-    # df: pd.DataFrame = pd.read_csv(LOCAL_TEST_CSV)
+    parser = argparse.ArgumentParser(description="Parse metrics.csv and upload to Big Query")
+    parser.add_argument("filepath", help="The path of metrics.csv to process")
+    args = parser.parse_args()
+
+    df: pd.DataFrame = pd.read_csv(args.filepath)
     df = format_litgpt_df(df, test_training_config, datetime.now())
     sync_metadata(test_training_config)
     upload_df(df, metrics_table)
